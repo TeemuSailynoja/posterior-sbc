@@ -1,0 +1,439 @@
+---
+title: "Lotka-Volterra predator-prey model: SBC"
+subtitle: "Hudson's Bay Company lynx-hare data"
+author: "Teemu Säilynoja"
+date: 2024-07-03
+date-modified: today
+format:
+  html:
+    toc: true
+    number-sections: true
+    code-copy: hover
+    code-tools: true
+    code-fold: true
+    self-contained-math: true
+    standalone: true
+    code-overflow: wrap
+    message: false
+    warning: false
+    fig-format: svg
+  pdf:
+    number-sections: true
+    echo: false
+    message: false
+    warning: false
+    fig-format: pdf
+    include-in-header: 
+       text: |
+         \usepackage{fvextra}
+         \DefineVerbatimEnvironment{Highlighting}{Verbatim}{breaklines,commandchars=\\\{\}}
+    include-before-body:
+      text: |
+        \RecustomVerbatimEnvironment{verbatim}{Verbatim}{
+          showspaces = false,
+          showtabs = false,
+          breaksymbolleft={},
+          breaklines
+        }
+---
+
+In this notebook, we collect the results of the four other SBC notebooks 
+handling the Lotka-Volterra model.
+ 
+```{r}
+#| output: false
+#| code-summary: Imports & setup
+#| label: Imports & setup
+library("bayesplot")
+library("SBC")
+library("ggplot2")
+library("ggforce")
+library("dplyr")
+library("extrafont")
+knitr::opts_knit$set(root.dir = "..")
+source("../R/modified_sbc_plots.R")
+colors <- c("#7fc97f", "#666666", "#ffff99", "#f0027f", "#bf5b17", "#386cb0")
+
+bayesplot_theme_set(theme_default(base_size = 20, base_family = "sans"))
+bayesplot::color_scheme_set(colors)
+theme_set(theme_default(base_size = 20, base_family = "sans"))
+options(ggplot2.discrete.fill = colors)
+options(ggplot2.discrete.color = colors)
+
+total_run_time <- function(sbc_outputs) {
+  sbc_outputs |>
+    unlist() |>
+    stringr::str_match("Total execution time: ([0-9]+.[0-9]+) seconds.") |>
+    as.numeric() |>
+    suppressWarnings() |>
+    Filter(f = \(n) !is.na(n)) |>
+    sum() |>
+    as.difftime(units = "secs")
+}
+```
+
+```{r}
+#| code-summary: Load results
+#| label: Laad results
+res_prior_raw <- readRDS("./lotka-volterra/sbc_results/results-prior_sbc-n_iter_250seed_845.rds")$result
+
+res_prior_pth <- readRDS("./lotka-volterra/sbc_results/results-prior_sbc-pth-n_iter_250seed_845.rds")$result
+
+res_posterior_raw <- readRDS("./lotka-volterra/sbc_results/results-posterior_sbc-n_iter_500_seed_2024.rds")$result
+
+res_posterior_pth <- readRDS("./lotka-volterra/sbc_results/results-posterior_sbc_init-n_iter_500_seed_2024.rds")$result
+```
+
+```{r}
+#| code-summary: Change variable names
+#| label: change-variable-names
+names_in_paper <- list(
+  "theta[1]" = "$\\alpha$",
+  "theta[2]" = "$\\beta$",
+  "theta[3]" = "$\\gamma$",
+  "theta[4]" = "$\\delta$",
+  "z_init[1]" = "$H_0$",
+  "z_init[2]" = "$L_0$",
+  "sigma[1]" = "$\\sigma_h$",
+  "sigma[2]" = "$\\sigma_l$",
+  "loglik" = "log-likelihood"
+)
+
+label_for_paper <- function(labels, ...) {
+  ggforce::label_tex(
+    dplyr::mutate_all(
+      labels, \(col) names_in_paper[col]
+    ),
+    ...
+  )
+}
+```
+
+\newpage
+
+## Prior SBC
+
+### First attempt
+
+::: {.callout-note appearance="minimal" icon="false" collapse="true" title="SBC diagnostic messages"}
+```{r}
+#| code-fold: false
+summary(res_prior_raw)
+```
+:::
+
+According to the SBC diagnostics, roughly one in ten of the prior SBC iterations had some divergent
+transitions, or iterations that saturated the maximum treedepth. Additionally, we received warnings
+of high $\hat R$ values. All of the iterations had some steps rejected. Some rejections are common
+at the early stages of warm-up stage, but shouldn't continue to the sampling stage after warm-up.
+Three fits failed completely.
+
+Running `r length(res_prior_raw$fits)` SBC iterations took
+`r total_run_time(res_prior_raw$outputs) |> prettyunits::pretty_dt()`.
+
+```{r}
+#| label: prior-sbc
+#| fig-width: 10
+#| fig-height: 5
+with(res_prior_raw$stats, {
+  print(modified_ppc_pit_ecdf_grouped(
+    pit = as.vector(
+      rank[variable != "loglik"] / max_rank[variable != "loglik"]
+    ),
+    group = variable[variable != "loglik"],
+    plot_diff = T,
+    facet_labeller = label_for_paper
+  ) +
+    theme(
+      axis.text = element_blank(),
+      axis.ticks = element_blank()
+    )
+  )
+
+  ppc_pit_ecdf(
+    pit = as.vector(
+      rank[variable == "loglik"] / max_rank[variable == "loglik"]
+    ),
+    plot_diff = T
+  ) +
+    scale_x_continuous(breaks = scales::breaks_extended()) +
+    scale_y_continuous(breaks = scales::breaks_extended(3))
+})  
+```
+
+```{r}
+#| label: prior-sbc-recovery
+#| fig-width: 11
+#| fig-height: 2
+modified_plot_sim_estimated(
+  res_prior_raw$stats,
+  variables = names(names_in_paper[names_in_paper != "log-likelihood"]),
+  facet_labeller = label_for_paper,
+  alpha = 1, nrow = 1) +
+  # scale_x_continuous(breaks = scales::breaks_extended(
+  #   n = 3,
+  #   only.loose = TRUE,
+  #   w = c(0.5, 0.03, 0.3, 0.1),
+  #   Q = c(0, 0.1 * 1:5, 1:5, 10 * (1:5), 100 * (1:5)))) +
+  # scale_y_continuous(breaks = scales::breaks_extended(
+  #   n = 3,
+  #   only.loose = TRUE,
+  #   w = c(0.5, 0.05, 0.4, 0.05),
+  #   Q = c(0, 0.1 * 1:5, 1:5, 10 * (1:5), 100 * (1:5))
+  # )) +
+  labs(x = "Ground truth", y = "Estimate") +
+    theme_default(base_size = 18, base_family = "sans") +
+    theme(
+      axis.text = element_blank(),
+      axis.ticks = element_blank()
+    ) +
+    NULL
+```
+
+From the PIT-ECDF plots, we see that there seems to be some tendency to underestimate the joint
+log-likelihood. We see that some iterations had especially bad parameter recovery.
+
+### Using Pathfinder for initialization
+
+::: {.callout-note appearance="minimal" icon="false" collapse="true" title="SBC diagnostic messages"}
+```{r}
+#| code-fold: false
+summary(res_prior_pth)
+```
+:::
+
+We attempt at improving the inference by initializing the Markov chains with Pathfinder. We don't
+anymore have fits that would fail completely, and have in general improved the convergence
+diagnostics. Still the inference is not without problems. This time, running
+`r length(res_prior_pth$fits)` SBC iterations took
+`r total_run_time(res_prior_pth$outputs) |> prettyunits::pretty_dt()`.
+
+```{r}
+#| label: prior-sbc-pth
+#| fig-width: 10
+#| fig-height: 5
+with(res_prior_pth$stats, {
+  print(modified_ppc_pit_ecdf_grouped(
+    pit = as.vector(
+      rank[variable != "loglik"] / max_rank[variable != "loglik"]
+    ),
+    group = variable[variable != "loglik"],
+    plot_diff = T,
+    facet_labeller = label_for_paper
+  ) +
+    theme(
+      axis.text = element_blank(),
+      axis.ticks = element_blank()
+    )
+  )
+
+  ppc_pit_ecdf(
+    pit = as.vector(
+      rank[variable == "loglik"] / max_rank[variable == "loglik"]
+    ),
+    plot_diff = T
+  ) +
+    scale_x_continuous(breaks = scales::breaks_extended(2)) +
+    scale_y_continuous(breaks = scales::breaks_extended(3))
+})
+```
+
+```{r}
+#| label: prior-sbc-pth-recovery
+#| fig-width: 11
+#| fig-height: 2
+modified_plot_sim_estimated(
+  res_prior_pth$stats,
+  variables = names(names_in_paper[names_in_paper != "log-likelihood"]),
+  facet_labeller = label_for_paper,
+  alpha = 1, nrow = 1) +
+  labs(x = "Ground truth", y = "Estimate") +
+    theme_default(base_size = 18, base_family = "sans") +
+    theme(
+      axis.text = element_blank(),
+      axis.ticks = element_blank()
+    ) +
+  NULL
+```
+The PIT-ECDF plots look very similar, and we still see some cases of bad parameter recovery.
+
+### Conclusion
+
+Even with the Pathfinder initialization, the inference isn't calibrated and we can't trust the model
+to in general give us trustworthy inference results.
+
+One could try to improve the priors, or the computational aspects of the model. Perhaps adjusting
+the tolerance of the ODE solver, or increasing the adapt delta and max treedepth parameters of the
+NUTS algorithm could improve the results.
+
+As the inference is relatively slow, iterating on the model is quite slow.
+
+## Posterior SBC
+
+Next, we condition our analysis on the historical Hudson Bay Company data of lynxes and hares.
+
+### First attempt
+
+::: {.callout-note appearance="minimal" icon="false" collapse="true" title="SBC diagnostic messages"}
+
+
+```{r}
+#| code-fold: false
+summary(res_posterior_raw)
+```
+
+:::
+
+We still observe issues in the inference. Large $\hat R$ values are more common than with prior SBC,
+and we have multiple fits and chains that fail to produce samples.
+
+We do see, that the inference is faster. Running `r length(res_posterior_raw$fits)` SBC iterations
+took `r total_run_time(res_posterior_raw$outputs) |> prettyunits::pretty_dt()`.
+
+```{r}
+#| label: psoterior-sbc
+#| fig-width: 10
+#| fig-height: 5
+with(res_posterior_raw$stats, {
+  print(modified_ppc_pit_ecdf_grouped(
+    pit = as.vector(
+      rank[variable != "loglik"] / max_rank[variable != "loglik"]
+    ),
+    group = variable[variable != "loglik"],
+    plot_diff = T,
+    facet_labeller = label_for_paper
+  ) +
+    theme(
+      axis.text = element_blank(),
+      axis.ticks = element_blank()
+    )
+  )
+
+  ppc_pit_ecdf(
+    pit = as.vector(
+      rank[variable == "loglik"] / max_rank[variable == "loglik"]
+    ),
+    plot_diff = T
+  ) +
+    scale_x_continuous(breaks = scales::breaks_extended()) +
+    scale_y_continuous(breaks = scales::breaks_extended(3))
+})
+
+```
+
+```{r}
+#| label: posterior-sbc-recovery
+#| fig-width: 11
+#| fig-height: 2
+modified_plot_sim_estimated(
+  res_posterior_raw$stats,
+  variables = names(names_in_paper[names_in_paper != "log-likelihood"]),
+  facet_labeller = label_for_paper,
+  alpha = 1, nrow = 1) +
+  labs(x = "Ground truth", y = "Estimate") +
+    theme_default(base_size = 18, base_family = "sans") +
+    theme(
+      axis.text = element_blank(),
+      axis.ticks = element_blank()
+    ) +
+  NULL
+```
+
+The PIT-ECDF plots are telling of great issues with the calibration of the posterior inference. The
+join log-likelihood is in general over estimated, while especially the estimates of the initial
+populations seem to have calibration issues.
+
+### Using Pathfinder for initialization
+
+::: {.callout-note appearance="minimal" icon="false" collapse="true" title="SBC diagnostic messages"}
+```{r}
+#| code-fold: false
+summary(res_posterior_pth)
+```
+
+:::
+
+Again, we employ Pathfinder to initialize the Markov chains. The high $\hat R$ values as well as
+some individual posterior plots indicate multi-modality. We still have a warning about large $\hat
+R$ values, but now even the largest $\hat R$ is only 1.012. Additionally we have no warnings on
+divergent transitions or max treedepths. We still have rejections in the sampling, but the maximum
+number of rejections was 25 and was likely to take place in the early stages of the warm-up.
+
+We also observe a massive boost in sampling efficiency, as running `r length(res_posterior_pth$fits)` SBC iterations only took `r total_run_time(res_posterior_pth$outputs) |> prettyunits::pretty_dt()`.
+
+```{r}
+#| label: psoterior-sbc-pth
+#| fig-width: 10
+#| fig-height: 5
+with(res_posterior_pth$stats, {
+  print(modified_ppc_pit_ecdf_grouped(
+    pit = as.vector(
+      rank[variable != "loglik"] / max_rank[variable != "loglik"]
+    ),
+    group = variable[variable != "loglik"],
+    plot_diff = T,
+    facet_labeller = label_for_paper
+  ) +
+    theme(
+      axis.text = element_blank(),
+      axis.ticks = element_blank()
+    )
+  )
+
+  ppc_pit_ecdf(
+    pit = as.vector(
+      rank[variable == "loglik"] / max_rank[variable == "loglik"]
+    ),
+    plot_diff = T
+  ) +
+    scale_x_continuous(breaks = scales::breaks_extended()) +
+    scale_y_continuous(breaks = scales::breaks_extended(3))
+})
+
+```
+
+```{r}
+#| label: posterior-sbc-pth-recovery
+#| fig-width: 11
+#| fig-height: 2
+modified_plot_sim_estimated(
+  res_posterior_pth$stats,
+  variables = names(names_in_paper[names_in_paper != "log-likelihood"]),
+  facet_labeller = label_for_paper,
+  alpha = 1, nrow = 1) +
+  labs(x = "Ground truth", y = "Estimate") +
+    theme_default(base_size = 18, base_family = "sans") +
+    theme(
+      axis.text = element_blank(),
+      axis.ticks = element_blank()
+    ) +
+  NULL
+```
+All of the PIT-ECDF plots look good, and the parameter recovery is decent.
+
+### Conclusion
+
+After posterior SBC, the inference with Pathfinder initialization looks good enough for us to use
+the model.
+
+
+```{r}
+#| label: lv-sbc-comparison
+#| fig-height: 5
+#| fig-width: 10
+with(dplyr::bind_rows(
+  cbind(res_prior_pth$stats, data.frame(sbc_type = "Prior SBC")),
+  cbind(res_posterior_pth$stats, data.frame(sbc_type = "Posterior SBC"))
+), {
+  ppc_pit_ecdf_grouped(
+    pit = as.vector(
+      rank[variable == "loglik"] / max_rank[variable == "loglik"]
+    ),
+    group = factor(sbc_type[variable == "loglik"], levels = c("Prior SBC", "Posterior SBC")),
+    plot_diff = T
+  ) +
+    scale_x_continuous(breaks = scales::breaks_extended(2)) +
+    scale_y_continuous(breaks = scales::breaks_extended(3)) +
+    labs(y = "ECDF difference")
+})
+```

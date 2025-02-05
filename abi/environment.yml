@@ -1,0 +1,36 @@
+name: posteriorsbc
+channels:
+  - conda-forge
+  - pytorch
+  - nvidia
+  - defaults
+dependencies:
+  - python=3.11
+  # Compiler packages, must be supported by CUDA
+  # https://docs.nvidia.com/cuda/cuda-installation-guide-linux/#host-compiler-support-policy
+  - compilers
+  - gcc>=11.4,<13.2
+  - gxx>=11.4,<13.2
+  - gfortran>=11.4,<13.2
+  - clang>=7,<17.0
+  # CUDA versions are determined by pytorch
+  - cudnn>=8.9.2,<9
+  - cuda-version>=12.1,<12.2
+  - cuda-compiler>=12.1,<12.2
+  - cuda-nvcc>=12.1,<12.2
+  - cuda-libraries-dev>=12.1,<12.2
+  - numpy==1.26.4
+  - pytorch=2.2.2
+  - pytorch-cuda=12.1
+  - torchaudio
+  - torchvision
+  # Force blas versions
+  - blas * mkl
+  - libblas=*=*mkl*
+  # These follow the CUDA version set by pytorch
+  - tensorflow=2.15=cuda12*
+  - pip=24.0
+  - numba=0.60
+  - pip:
+      - bayesflow==1.1.6
+      - freia==0.2

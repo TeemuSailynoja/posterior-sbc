@@ -1,0 +1,388 @@
+---
+title: Prior SBC on the Lotka-Volterra model
+author: Teemu Säilynoja
+date: 2024-06-20
+date-modified: last-modified
+format:
+  html:
+    toc: true
+    number-sections: true
+    code-copy: hover
+    code-tools: true
+    code-fold: true
+    self-contained-math: true
+    standalone: true
+    code-overflow: wrap
+    message: false
+    warning: false
+    fig-format: svg
+  pdf:
+    number-sections: true
+    echo: false
+    message: false
+    warning: false
+    fig-width: 8
+    fig-height: 6
+    fig-format: pdf
+    include-in-header: 
+       text: |
+         \usepackage{fvextra}
+         \DefineVerbatimEnvironment{Highlighting}{Verbatim}{breaklines,commandchars=\\\{\}}
+    include-before-body:
+      text: |
+        \RecustomVerbatimEnvironment{verbatim}{Verbatim}{
+          showspaces = false,
+          showtabs = false,
+          breaksymbolleft={},
+          breaklines
+        }
+params:
+  n_sbc_iterations: 250
+  n_samples: 4000
+  iter_warmup: 1000
+  seed: 845
+---
+
+
+In this notebook, we show the results of calibration assessment on the 
+[Lotka-Volterra model](https://mc-stan.org/learn-stan/case-studies/lotka-volterra-predator-prey.html) using prior SBC.
+For collected results of all our experiments, see the notebook named [lotka-volterra-sbc](lotka-volterra-sbc.html).
+
+```{r}
+#| label: imports-and-options
+#| output: false
+#| code-summary: "imports and options"
+#| code-fold: true
+library(SBC)
+library(calculus)
+library(cmdstanr)
+library(ggplot2)
+library(bayesplot)
+colors <- c("#7fc97f", "#666666", "#ffff99", "#f0027f", "#bf5b17", "#386cb0")
+
+bayesplot::color_scheme_set(colors)
+options(ggplot2.discrete.fill = colors)
+options(ggplot2.discrete.color = colors)
+options(ggplot2.binned.color = colors)
+
+source("../R/modified_sbc_plots.R")
+theme_set(
+  theme_default(base_size = 16, base_family = "sans"))
+options(mc.cores = parallel::detectCores())
+
+cache_dir <- "sbc_results"
+
+names_in_paper <- list(
+  "theta[1]" = "$\\alpha$",
+  "theta[2]" = "$\\beta$",
+  "theta[3]" = "$\\gamma$",
+  "theta[4]" = "$\\delta$",
+  "z_init[1]" = "$H_0$",
+  "z_init[2]" = "$L_0$",
+  "sigma[1]" = "$\\sigma_h$",
+  "sigma[2]" = "$\\sigma_l$",
+  "loglik" = "log-likelihood"
+)
+
+label_for_paper <- function(labels, ...) {
+  ggforce::label_tex(
+    dplyr::mutate_all(
+      labels, \(col) names_in_paper[col]
+    ),
+    ...
+  )
+}
+```
+
+## Setup
+Like the original Hudson Bay data, we simulate data sets of 21 years. We run the SBC on
+`r params$n_sbc_iterations` prior predictive samples, each with a total of `r params$n_samples` post
+warm-up posterior samples, what will be thinned down by a factor of 10, yielding
+`r params$n_samples / 10` posterior draws for calculating the rank of the prior draws and joint log-likelihood.
+
+```{r}
+#| label: sbc-parameters
+#| echo: false
+n_years <- 21
+n_sbc_iterations <- params$n_sbc_iterations
+n_samples <- params$n_samples
+n_chains <- 4
+iter_warmup <- params$iter_warmup
+thin_by <- 10
+seed <- params$seed
+set.seed(seed)
+```
+
+## The Model
+```{r}
+#| label: The Stan model
+#| class-output: stan
+#| code-summary: "Load the following Stan model:"
+#| code-fold: true
+model <- cmdstanr::cmdstan_model("models/lotka_volterra.stan")
+model$print()
+```
+
+## Simulation-based calibration
+
+### Prior predictive samples
+For implementing the SBC, we use the [SBC R-package](https://hyunjimoon.github.io/SBC/index.html) by Angie H. Moon et al.
+First, we define the data generating process, which in our case is generating prior predictive samples.
+
+```{r}
+#| label: prior_predictive_generator
+prior_predictive_generator_years <- function(n_years){
+  # Some prior predictive samples produce negative populations.
+  # We reject those, but out of curiosity I'll add a counter to keep
+  # track of the number of rejected samples.
+  valid_populations <- FALSE
+  n_tries <- 0
+  while (!valid_populations) {
+    n_tries <- n_tries + 1
+    # Draw parameter values from the prior:
+    alpha <- qnorm(runif(1, pnorm(0, 1, .5), 1), 1, .5)
+    beta <- qnorm(runif(1, pnorm(0, .05, .05), 1), .05, .05)
+    gamma <- qnorm(runif(1, pnorm(0, 1, .5), 1), 1, .5)
+    delta <- qnorm(runif(1, pnorm(0, .05, .05), 1), .05, .05)
+
+    l0 <- rlnorm(1, log(10), 1)
+    h0 <- rlnorm(1, log(10), 1)
+
+    # Solve the ODE system to get populations for years 2-21.
+    pops <- ode(f = function(h, l) {
+      c((alpha - beta * l)*h, (-gamma + delta * h)*l)
+      },
+                var = c(h = h0, l = l0),
+                times = seq(1,n_years, .1))
+    if (all(pops > 0)) {
+      valid_populations <- TRUE
+    }
+  }
+  
+  # With valid populations, draw observation noise from priors and
+  # simulate observations.
+  sigma_h <- rlnorm(1, -1, 1)
+  sigma_l <- rlnorm(1, -1, 1)
+  hare_pelts <- rlnorm(n_years, log(pops[seq(1,201,10),1]), sigma_h)
+  lynx_pelts <- rlnorm(n_years, log(pops[seq(1,201,10),2]), sigma_l)
+  
+  # Return the ground truth as `variables` and observations as `generated` 
+  list(
+    variables = list(
+      theta = c(alpha, beta, gamma, delta),
+      z_init = c(h0, l0),
+      sigma = c(sigma_h, sigma_l),
+      loglik = sum(dlnorm(hare_pelts, log(pops[seq(1,201,10), 1]), sigma_h, log = T)) +
+        sum(dlnorm(lynx_pelts, log(pops[seq(1,201,10), 2]), sigma_l, log = T))
+    ),
+    generated = list(
+      N = n_years - 1,
+      ts = 2:n_years,
+      y_init = c(hare_pelts[1], lynx_pelts[1]),
+      y = matrix(c(hare_pelts[-1], lynx_pelts[-1]), ncol = 2),
+      n_tries = n_tries
+    )
+  )
+}
+```
+
+Next, we use the data generating process to define a data generator and construct `r n_sbc_iterations` data sets for SBC.
+
+```{r}
+#| label: prior_predictive_datasets
+prior_predictive_generator <- SBC_generator_function(
+  prior_predictive_generator_years, n_years = n_years)
+
+prior_predictive_datasets <- generate_datasets(
+  prior_predictive_generator, n_sims = n_sbc_iterations)
+
+```
+
+
+```{r}
+pr_sample <- sample.int(n_sbc_iterations, 7) |>
+  lapply(\(id) {
+    data.frame(rbind(
+      prior_predictive_datasets$generated[[id]]$y_init,
+      prior_predictive_datasets$generated[[id]]$y
+      ))   |>
+      dplyr::rename(Hare = X1, Lynx = X2) |>
+      cbind(data.frame(gen_id = paste("PP", id), Year = 1900:1920))
+    }) |>
+  dplyr::bind_rows() |> 
+  rbind(
+    read.csv("hudson-bay-lynx-hare.csv",
+           comment.char = "#") |> 
+      cbind(data.frame(gen_id = "Observed"))
+  )
+```
+
+
+```{r}
+#| label: prior-pc-pelt-year
+#| fig-cap: Observed data compared to prior predictive draws.
+pr_sample |> 
+  ggplot() +
+  aes(x = Year) +
+  geom_path(aes(y = Hare, colour = "Hare")) +
+  geom_path(aes(y = Lynx, colour = "Lynx")) +
+  facet_wrap(
+    ~ gen_id,
+    scales = "free_y",
+    nrow = 2,
+    labeller = as_labeller(\(x) {ifelse(x == "Observed", "Observed", "")})
+  ) +
+  theme(legend.position = "bottom") +
+  labs(y = "Pelts (thousands)", x = "Year", colour = "Species") + scale_color_manual(values = colors[c(5,6)]) +
+  scale_x_continuous(breaks = scales::breaks_pretty(2))
+```
+
+```{r}
+#| label: prior-pc-hare-lynx
+#| fig-cap: Trajectories of the population dynamics in the observation and the prior predictive draws from above.
+pr_sample |> 
+  ggplot() +
+  aes(x = Hare, y = Lynx, group = gen_id) +
+  geom_path() +
+  facet_wrap(vars(gen_id), scales = "free", nrow = 2) +
+  theme(legend.position = "bottom") +
+  labs(y = "Lynx pelts (thousands)", x = "Hare pelts (thousands)")
+```
+
+### Posterior samples
+We use `cmdstanr` to obtain posterior draws via MCMC sampling.
+
+```{r}
+#| label: cmdstan_backend
+stan_backend <- SBC_backend_cmdstan_sample(
+  model,
+  iter_warmup = iter_warmup,
+  iter_sampling = n_samples / n_chains,
+  chains = n_chains,
+  refresh = 0
+)
+```
+
+### Run SBC
+This is the step requiring a lot of computation. We run MCMC on each of the
+predictive samples and store statistics of the results.
+```{r}
+#| label: run-sbc
+
+cache_location <- file.path(
+  cache_dir,
+  paste(
+    "results-prior_sbc-n_iter_",
+    n_sbc_iterations,
+    "seed_",
+    seed,
+    ".rds",
+    sep = ""
+  )
+)
+
+if (file.exists(cache_location)) {
+  results <- readRDS(cache_location)$result
+} else {
+  results <- compute_SBC(
+    prior_predictive_datasets,
+    stan_backend,
+    cache_mode = "results",
+    cache_location = file.path(
+      cache_dir,
+      paste("results-n_iter_", n_sbc_iterations, "seed_", seed, sep = "")
+    ),
+    keep_fits = F,
+    chunk_size = 4,
+    thin_ranks = thin_by
+  )
+}
+```
+
+### Results
+
+```{r}
+#| label: analyse-results
+#| echo: false
+#| eval: false
+ggplot(results$stats,
+       aes(x = simulated_value, y = rank, colour = rhat)) +
+  geom_point() +
+  facet_wrap(vars(variable), scales = "free") +
+  scale_colour_binned(
+    type = "viridis",
+    breaks = c(1.05),
+    limits = c(1, 2.5),
+    guide = guide_coloursteps(even.steps = TRUE, show.limits = TRUE)
+  ) +
+  theme(legend.position = "bottom")
+```
+
+
+```{r}
+#| echo: false
+#| eval: false
+results$stats |>
+  dplyr::select(sim_id, variable, simulated_value) |>
+  tidyr::pivot_wider(names_from = variable, values_from = simulated_value) |>
+  dplyr::left_join(
+    results$stats |>
+      dplyr::group_by(sim_id) |>
+      dplyr::summarise(ess_bulk = min(ess_bulk), rhat = max(rhat)),
+    by = c("sim_id")
+  ) |>
+  ggplot() +
+  geom_point(aes(x = .panel_x, y = .panel_y, colour = rhat), alpha = .5) +
+  ggforce::geom_autodensity(aes(group = rhat > 1.05, fill = ifelse(rhat > 1.05, 2, 1)),
+                            alpha = .5,
+                            position = "identity") +
+  ggforce::facet_matrix(vars(unique(results$stats$variable)), layer.diag = 2) +
+  scale_colour_binned(
+    aesthetics = c("colour", "fill"),
+    type = "viridis",
+    breaks = c(1.05),
+    limits = c(1, 2.5),
+    guide = guide_coloursteps(
+      even.steps = TRUE,
+      show.limits = TRUE,
+      title = "Rhat"
+    )
+  ) +
+  theme(legend.position = "bottom")
+
+```
+
+
+A simple plot to compare the posterior samples and the ground truth values.
+
+```{r}
+#| label: prior-sbc_sim_estimated
+#| warning: false
+modified_plot_sim_estimated(
+  results$stats[results$stats$max_rank == n_samples / thin_by - 1, ],
+  variables = unique(results$stats$variable),
+  alpha = 1,
+  nrow = 3,
+  facet_labeller = label_for_paper) +
+  labs(x = "Ground truth", y = "Estimate")  +
+  scale_x_continuous(breaks = scales::breaks_extended(3)) +
+  scale_y_continuous(breaks = scales::breaks_extended(3))
+```
+
+The ECDF of the PIT values of the prior draw with regards to the posterior sample gives a principled way to check for the calibration of the model, as we can draw simultaneous 95% confidence intervals for the PIT-ECDFs.
+The joint log-likelihood is a good test quantity for overall calibration of the inference, and shows here some possible calibration issues, although the number of SBC iterations is quite low.
+
+```{r}
+#| label: prior-sbc-pit-ecdf-diff
+modified_ppc_pit_ecdf_grouped(
+  pit = (results$stats$rank / results$stats$max_rank)[results$stats$max_rank == n_samples / thin_by - 1],
+  group = results$stats$variable[results$stats$max_rank == n_samples / thin_by - 1],
+  plot_diff = TRUE,
+  nrow = 3,
+  facet_labeller = label_for_paper) +
+  theme(legend.position = "none") +
+  scale_x_continuous(breaks = scales::breaks_extended(3)) +
+  scale_y_continuous(breaks = scales::breaks_extended(3))
+```
+
+

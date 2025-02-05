@@ -1,0 +1,291 @@
+---
+title: "Hierarchical model: SBC"
+subtitle: Prior SBC can't recommend model parameterisation  
+author: Teemu Säilynoja
+date: 2024-11-08
+date-modified: today
+format:
+  html:
+    toc: true
+    number-sections: true
+    code-copy: hover
+    code-tools: true
+    code-fold: true
+    self-contained-math: true
+    standalone: true
+    code-overflow: wrap
+    message: false
+    warning: false
+    fig-format: svg
+  pdf:
+    toc: true
+    number-sections: true
+    echo: false
+    message: false
+    warning: false
+    fig-format: pdf
+    include-in-header: 
+       text: |
+         \usepackage{fvextra}
+         \DefineVerbatimEnvironment{Highlighting}{Verbatim}{breaklines,commandchars=\\\{\}}
+    include-before-body:
+      text: |
+        \RecustomVerbatimEnvironment{verbatim}{Verbatim}{
+          showspaces = false,
+          showtabs = false,
+          breaksymbolleft={},
+          breaklines
+        }
+---
+
+```{r}
+library("bayesplot")
+library("ggplot2")
+library("ggforce")
+library("SBC")
+library("scales")
+source("../R/modified_sbc_plots.R")
+knitr::opts_knit$set(root.dir = "..")
+
+bayesplot_theme_set(
+  theme_default(base_size = 28, base_family = "sans") +
+  theme(axis.text.y = element_blank())
+)
+theme_set(
+  theme_default(base_size = 28, base_family = "sans") +
+  theme(axis.text.y = element_blank())
+)
+
+colors = c("#7fc97f", "#666666", "#ffff99", "#f0027f", "#bf5b17", "#386cb0")
+
+bayesplot::color_scheme_set(colors)
+options(ggplot2.discrete.fill = colors)
+options(ggplot2.discrete.color = colors)
+
+names_in_paper <- list(
+  "mu" = "$\\mu_0$",
+  "tau" = "$\\tau$",
+  "sigma" = "$\\sigma$",
+  "loglik" = "log-likelihood"
+  )
+  
+label_for_paper <- function(labels, ...) {
+  ggforce::label_tex(
+    dplyr::mutate_all(
+      labels, \(col) names_in_paper[col]
+    ),
+    ...
+  )
+}
+```
+
+```{r}
+res <- list(
+  prior_cp = readRDS("./hierarchical-model/sbc_results/prior_sbc_cp_niter_500_seed_8769.rds")$result,
+  prior_ncp = readRDS("./hierarchical-model/sbc_results/prior_sbc_ncp_niter_500_seed_8769.rds")$result,
+  posterior_cp_weak = readRDS("./hierarchical-model/sbc_results/posterior_sbc-cp-weak_likelihood-niter-500-seed-2024.rds")$result,
+  posterior_ncp_weak = readRDS("./hierarchical-model/sbc_results/posterior_sbc-ncp-weak_likelihood-niter-500-seed-2024.rds")$result,
+  posterior_cp_strong = readRDS("./hierarchical-model/sbc_results/posterior_sbc-cp-strong_likelihood-niter-500-seed-2024.rds")$result,
+  posterior_ncp_strong = readRDS("./hierarchical-model/sbc_results/posterior_sbc-ncp-strong_likelihood-niter-500-seed-2024.rds")$result
+)
+```
+
+Below, we have 50 groups of 5 observations with
+
+\begin{align*}
+\mu_0 &\sim \mathcal N(0,1), \\
+\tau, \sigma &\sim \mathcal N^+(0,1), \\
+\mu_j &\sim \mathcal N( \mu_0, \tau), \\ 
+y_{j,i} &\sim \mathcal N(\mu_j, \sigma).\\
+\end{align*}
+
+
+\newpage
+
+## Prior SBC
+
+```{r}
+#| layout-ncol: 2
+#| label: hierarchical-model-priorSBC
+#| fig-height: 8
+#| fig-width: 8
+#| fig-cap: 
+#|   - "Centered"
+#|   - "Non-centered"
+with(subset(
+  res$prior_cp$stats,
+  !startsWith(x = res$prior_cp$stats$variable, prefix = "theta")
+), {
+  modified_ppc_pit_ecdf_grouped(
+    pit = as.vector(rank / max_rank),
+    group = sapply(variable, \(v) names_in_paper[[v]]),
+    facet_labeller = "label_tex",
+    plot_diff = TRUE
+  ) +
+  #ggtitle("Prior SBC - CP") +
+  scale_x_continuous(breaks = breaks_pretty(n = 3)) +
+  scale_y_continuous(breaks = breaks_pretty(n = 3))
+})
+
+with(subset(
+  res$prior_ncp$stats,
+  !startsWith(x = res$prior_cp$stats$variable, prefix = "theta")
+), {
+  modified_ppc_pit_ecdf_grouped(
+    pit = as.vector(rank / max_rank),
+    group = sapply(variable, \(v) names_in_paper[[v]]),
+    facet_labeller = label_tex,
+    plot_diff = TRUE
+  ) +
+  #ggtitle("Prior SBC - NCP") +
+  scale_x_continuous(breaks = breaks_pretty(n = 3))
+})
+```
+
+
+Prior SBC for both CP and NCP looks good. No noticeable miscalibration.
+
+
+### Centered parametrisation
+
+::: {.callout-note appearance="minimal" icon="false" collapse="true" title="SBC diagnostic messages"}
+
+```{r}
+#| code-fold: false
+res$prior_cp |> summary()
+```
+::: 
+
+
+### Non-centered parametrisation
+::: {.callout-note appearance="minimal" icon="false" collapse="true" title="SBC diagnostic messages"}
+
+```{r}
+#| code-fold: false
+summary(res$prior_ncp)
+```
+::: 
+
+## Posterior SBC
+
+### Weak likelihood
+
+Generate data using $\mu_0 = 0$, $\tau_w$ = `r round(qnorm(.5 + .5 * .05, 0, 1),2)` (the 5\% quantile), and $\sigma$ = `r round(qnorm(.5 + .5 * .95, 0, 1),2)` (the 95\% quantile).
+
+
+```{r}
+#| layout-ncol: 2
+#| label: hierarchical-model-posteriorSBC-weak_likelihood
+#| fig-height: 8
+#| fig-width: 8
+#| fig-cap: 
+#|   - "Centered"
+#|   - "Non-centered"
+with(subset(
+  res$posterior_cp_weak$stats,
+  !startsWith(x = res$prior_cp$stats$variable, prefix = "theta")
+), {
+  modified_ppc_pit_ecdf_grouped(
+    pit = as.vector(rank / max_rank),
+    group = sapply(variable, \(v) names_in_paper[[v]]),
+    facet_labeller = label_tex,
+    plot_diff = TRUE
+  ) +
+    #ggtitle("Posterior SBC - CP: Weak likelihood") +
+    scale_x_continuous(breaks = breaks_pretty(n = 3)) + scale_y_continuous(breaks = breaks_pretty(n = 3))
+})
+with(subset(
+  res$posterior_ncp_weak$stats,
+  !startsWith(x = res$prior_cp$stats$variable, prefix = "theta")
+), {
+  modified_ppc_pit_ecdf_grouped(
+    pit = as.vector(rank / max_rank),
+    group = sapply(variable, \(v) names_in_paper[[v]]),
+    facet_labeller = label_tex,
+    plot_diff = TRUE
+  ) +
+    #ggtitle("Posterior SBC - NCP: Weak likelihood") +
+    scale_x_continuous(breaks = breaks_pretty(n = 3)) + scale_y_continuous(breaks = breaks_pretty(n = 3))
+})
+```
+
+For the centered parameterisation, we see a dip in the PIT-ECDF of $\tau$. The dip is visible also
+for the non-centered parameterisation, with also the joint log-likelihood looking suspicious.
+
+::: {.callout-note appearance="minimal" icon="false" collapse="true" title="SBC diagnostic messages"}
+
+```{r}
+#| code-fold: false
+summary(res$posterior_cp_weak)
+```
+::: 
+
+::: {.callout-note appearance="minimal" icon="false" collapse="true" title="SBC diagnostic messages"}
+
+```{r}
+#| code-fold: false
+summary(res$posterior_ncp_weak)
+```
+::: 
+
+
+### Strong likelihood
+
+Generate data using $\mu_0 = 0$, $\tau_w$ = `r round(qnorm(.5 + .5 * .95, 0, 1),2)` (the 95\% quantile), and $\sigma$ = `r round(qnorm(.5 + .5 * .05, 0, 1),2)` (the 5\% quantile).
+
+```{r}
+#| layout-ncol: 2
+#| label: hierarchical-model-posteriorSBC-strong_likelihood
+#| fig-height: 8
+#| fig-width: 8
+#| fig-cap: 
+#|   - "Centered"
+#|   - "Non-centered"
+with(subset(
+  res$posterior_cp_strong$stats,
+  !startsWith(x = res$prior_cp$stats$variable, prefix = "theta")
+), {
+  modified_ppc_pit_ecdf_grouped(
+    pit = as.vector(rank / max_rank),
+    group = sapply(variable, \(v) names_in_paper[[v]]),
+    facet_labeller = label_tex,
+    plot_diff = TRUE
+  ) +
+    #ggtitle("Posterior SBC - CP: Strong likelihood") +
+    scale_x_continuous(breaks = breaks_pretty(n = 3)) + scale_y_continuous(breaks = breaks_pretty(n = 3))
+})
+with(subset(
+  res$posterior_ncp_strong$stats,
+  !startsWith(x = res$prior_cp$stats$variable, prefix = "theta")
+), {
+  print(modified_ppc_pit_ecdf_grouped(
+    pit = as.vector(rank / max_rank),
+    group = sapply(variable, \(v) names_in_paper[[v]]),
+    facet_labeller = label_tex,
+    plot_diff = TRUE
+  ) +
+    #ggtitle("Posterior SBC - NCP: Strong likelihood") +
+    scale_x_continuous(breaks = breaks_pretty(n = 3)) + scale_y_continuous(breaks = breaks_pretty(n = 3))
+  )
+})
+```
+
+This looks good.
+
+The centered parameterisation is suitable for the observsation.
+
+Although not visible in the joint log-likelihood, if calibrated estimation of the population level parameters is important, the non-centered parameterisation would not be a good choice.
+
+::: {.callout-note appearance="minimal" icon="false" collapse="true" title="SBC diagnostic messages"}
+```{r}
+#| code-fold: false
+summary(res$posterior_cp_strong)
+```
+::: 
+
+::: {.callout-note appearance="minimal" icon="false" collapse="true" title="SBC diagnostic messages"}
+```{r}
+#| code-fold: false
+summary(res$posterior_ncp_strong)
+```
+::: 

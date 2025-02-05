@@ -1,0 +1,8 @@
+bayesflow==1.1.6
+ml_collections==0.1.1
+numba==0.60.0
+scikit-learn==1.5.0
+scipy==1.13.1
+seaborn==0.13.2
+tensorflow-probability==0.23.0
+

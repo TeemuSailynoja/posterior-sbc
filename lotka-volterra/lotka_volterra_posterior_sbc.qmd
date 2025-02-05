@@ -1,0 +1,504 @@
+---
+title: Posterior SBC on the Lotka-Volterra model
+author: Teemu Säilynoja
+date: 2024-07-03
+date-modified: last-modified
+format:
+  html:
+    toc: true
+    number-sections: true
+    code-copy: hover
+    code-tools: true
+    code-fold: true
+    self-contained-math: true
+    standalone: true
+    code-overflow: wrap
+    message: false
+    warning: false
+    fig-format: svg
+  pdf:
+    number-sections: true
+    echo: false
+    message: false
+    warning: false
+    fig-width: 8
+    fig-height: 6
+    fig-format: pdf
+    fig-cap-location: bottom
+    include-in-header: 
+       text: |
+         \usepackage{fvextra}
+         \DefineVerbatimEnvironment{Highlighting}{Verbatim}{breaklines,commandchars=\\\{\}}
+    include-before-body:
+      text: |
+        \RecustomVerbatimEnvironment{verbatim}{Verbatim}{
+          showspaces = false,
+          showtabs = false,
+          breaksymbolleft={},
+          breaklines
+        }
+params:
+  n_sbc_iter: 500
+  n_samples: 4000
+  iter_warmup: 1000
+  seed: 2024
+---
+
+
+In this notebook, we show the results of calibration assessment on the 
+[Lotka-Volterra model](https://mc-stan.org/learn-stan/case-studies/lotka-volterra-predator-prey.html) using posterior SBC. We begin by conditioning the model
+on the 21 years of observations shown below in @fig-lynx-hare-data.
+
+For collected results of all our experiments, see the notebook named [lotka-volterra-sbc](lotka-volterra-sbc.html).
+```{r}
+#| label: imports-and-options
+#| code-summary: "imports and options"
+library(SBC)
+library(bayesplot)
+library(calculus)
+library(cmdstanr)
+library(posterior)
+library(ggplot2)
+
+options(mc.cores = parallel::detectCores())
+colors <- c("#7fc97f", "#666666", "#ffff99", "#f0027f", "#bf5b17", "#386cb0")
+
+bayesplot::color_scheme_set(colors)
+options(ggplot2.discrete.fill = colors)
+options(ggplot2.discrete.color = colors)
+options(ggplot2.binned.color = colors)
+
+theme_set(
+  theme_default(base_size = 16, base_family = "sans"))
+bayesplot_theme_set(
+  theme_default(base_size = 16, base_family = "sans"))
+options(mc.cores = parallel::detectCores())
+source("../R/modified_sbc_plots.R")
+
+save_stan_fit <- TRUE
+stan_fit_dir <- "fits"
+cache_dir <- "sbc_results"
+
+names_in_paper <- list(
+  "theta[1]" = "$\\alpha$",
+  "theta[2]" = "$\\beta$",
+  "theta[3]" = "$\\gamma$",
+  "theta[4]" = "$\\delta$",
+  "z_init[1]" = "$H_0$",
+  "z_init[2]" = "$L_0$",
+  "sigma[1]" = "$\\sigma_h$",
+  "sigma[2]" = "$\\sigma_l$",
+  "loglik" = "log-likelihood"
+)
+
+label_for_paper <- function(labels, ...) {
+  ggforce::label_tex(
+    dplyr::mutate_all(
+      labels, \(col) names_in_paper[col]
+    ),
+    ...
+  )
+}
+```
+
+```{r}
+#| label: sbc-parameters
+thin_by <- 10
+n_samples <- params$n_samples
+iter_warmup <- params$iter_warmup
+n_chains <- 4
+n_sbc_iter <- params$n_sbc_iter
+seed <- params$seed
+set.seed(seed)
+```
+
+```{r}
+#| label: fig-lynx-hare-data
+#| fig-cap: "Historical data of pelts collected by Hudson Bay company."
+lynx_hare_df <-
+  read.csv("hudson-bay-lynx-hare.csv",
+           comment.char = "#")
+lynx_hare_df |>
+  ggplot(aes(x = Year)) +
+  geom_path(aes(y = Lynx,
+                colour = "Lynx")) +
+  geom_path(aes(y = Hare,
+                colour = "Hare")) +
+  theme(legend.position = "inside",
+        legend.position.inside = c(.9,.95)) +
+  labs(y = "Pelts", colour = "") +
+  scale_colour_manual(values = c("Hare" = colors[5], "Lynx" = colors[6]))
+```
+
+## The Model
+
+```{r}
+#| label: The Stan model
+#| class-output: stan
+#| code-summary: "Load the following Stan model"
+model_pred <- cmdstanr::cmdstan_model("models/lotka_volterra_pred.stan")
+```
+
+```{r}
+#|label: condition posterior
+if (file.exists(file.path(stan_fit_dir, "fit0.RDS"))) {
+  fit0 <- readRDS(file.path(stan_fit_dir, "fit0.RDS"))
+} else {
+  fit0 <- model_pred$sample(
+    data = list(
+      N = nrow(lynx_hare_df) - 1,
+      ts = 2:nrow(lynx_hare_df),
+      y_init = c(lynx_hare_df$Hare[1], lynx_hare_df$Lynx[1]),
+      y = as.matrix(lynx_hare_df[-1, c(3,2)]),
+      n_pred = 0
+    ),
+    seed = seed,
+    refresh = 0,
+    parallel_chains = n_chains,
+    iter_warmup = iter_warmup,
+    iter_sampling = n_samples / n_chains
+  )
+  if (save_stan_fit) {
+    fit0$save_object(file.path(stan_fit_dir, "fit0.RDS"))
+  }
+}
+```
+
+We receive no warnings of divergent transitions, or high R hat values, but see strong correlation between many of the parameter posteriors.
+```{r}
+#| label: fig-posterior-pairs
+mcmc_pairs(
+  x = fit0$draws(
+    variables = c("theta", "sigma")
+  ),
+  condition = pairs_condition(draws = .5),
+  off_diag_args = list(
+    alpha = .1,
+    size = .5
+  )
+)
+```
+
+## Data conditioned simulation-based calibration
+Nex, we run posterior SBC, by augmenting the data with posterior predictive draws and refitting the model to these two datasets.
+
+```{r}
+gen_vars <- as_draws_matrix(merge_chains(thin_draws(fit0$draws(
+  variables = c("theta", "z_init", "z", "sigma", "loglik")
+), n_samples / n_sbc_iter)))
+pred_sample <- as_draws_matrix(merge_chains(thin_draws(fit0$draws(
+  variables = c("y_init_rep", "y_rep")
+), n_samples / n_sbc_iter)))
+
+gen_vars[, "loglik"] <- gen_vars[, "loglik"] +
+  sapply(1:nrow(gen_vars), \(k) {
+  dlnorm(pred_sample[k, "y_init_rep[1]"], log(gen_vars[k, "z_init[1]"]), gen_vars[k, "sigma[1]"], log = T) +
+    dlnorm(pred_sample[k, "y_init_rep[2]"], log(gen_vars[k, "z_init[2]"]), gen_vars[k, "sigma[2]"], log = T) +
+    sum(dlnorm(pred_sample[k, paste("y_rep[", 1:20, ",1]", sep = "")], log(gen_vars[k, paste("z[", 1:20, ",1]", sep = "")]), gen_vars[k, "sigma[1]"], log = T)) +
+    sum(dlnorm(pred_sample[k, paste("y_rep[", 1:20, ",2]", sep = "")], log(gen_vars[k, paste("z[", 1:20, ",2]", sep = "")]), gen_vars[k, "sigma[2]"], log = T))
+})
+
+posterior_datasets <- SBC_datasets(variables = gen_vars[, c(
+  "theta[1]",
+  "theta[2]",
+  "theta[3]",
+  "theta[4]",
+  "z_init[1]",
+  "z_init[2]",
+  "sigma[1]",
+  "sigma[2]",
+  "loglik"
+)],
+generated = apply(
+  pred_sample,
+  1,
+  \(sample) list(
+    N = nrow(lynx_hare_df) - 1,
+    ts = 2:nrow(lynx_hare_df),
+    y_init2 = sample[1:2],
+    y2 = matrix(sample[-c(1, 2)], ncol = 2),
+    y_init = c(lynx_hare_df$Hare[1], lynx_hare_df$Lynx[1]),
+    y = as.matrix(lynx_hare_df[-1, c(3, 2)])
+  )
+))
+```
+
+
+```{r}
+#| label: The Stan model for SBC
+#| class-output: stan
+#| code-summary: "Stan model for SBC"
+sbc_model <- cmdstanr::cmdstan_model("models/lotka_volterra_postSBC.stan")
+```
+
+
+```{r}
+#| label: SBC-backend
+stan_backend <- SBC_backend_cmdstan_sample(
+  sbc_model, iter_warmup = iter_warmup,
+  iter_sampling = n_samples / n_chains,
+  chains = n_chains)
+```
+
+
+```{r}
+#| label: SBC-results
+cache_location <- file.path(
+  cache_dir,
+  paste(
+    "results-posterior_sbc-n_iter_",
+    n_sbc_iter,
+    "_seed_",
+    seed,
+    ".rds",
+    sep = ""
+  )
+)
+
+if (file.exists(cache_location)) {
+  results_post_sbc <- readRDS(cache_location)$result
+} else {
+  results_post_sbc <- compute_SBC(
+  posterior_datasets,
+  stan_backend,
+  cache_mode = "results",
+  cache_location = file.path(
+    cache_dir,
+    paste("results-posterior_sbc-n_iter_",
+    n_sbc_iter,
+    "seed_", seed, sep = "")
+  ),
+  keep_fits = F,
+  thin_ranks = thin_by
+)
+}
+```
+
+::: {.callout-note appearance="minimal" icon="false" collapse="true" title="SBC diagnostic messages"}
+```{r}
+#| code-fold: true
+summary(results_post_sbc)
+```
+:::
+
+We receive warnings of iterations with high R hat values and one or more divergent transitions. In the calibration assessment in @fig-pit-ecdf we see some apparent calibration issues. This is perhaps not as clear from the parameter recovery plots in @fig-parameter-recovery, but there too we see some outliers and in general large uncertainty. This is
+likely due to the often occurring multi-modal posteriors, one of which is later shown in @fig-augmented-pairs.
+
+```{r}
+#| label: fig-pit-ecdf
+modified_ppc_pit_ecdf_grouped(
+  pit = results_post_sbc$stats$rank[results_post_sbc$stats$max_rank == n_samples / thin_by - 1] / results_post_sbc$stats$max_rank[results_post_sbc$stats$max_rank == n_samples / thin_by - 1], group = results_post_sbc$stats$variable[results_post_sbc$stats$max_rank == n_samples / thin_by - 1],
+  plot_diff = TRUE,
+  nrow = 3,
+  facet_labeller = label_for_paper) +
+  theme(legend.position = "none") +
+  scale_x_continuous(breaks = scales::breaks_extended(3, only.loose = TRUE)) +
+  scale_y_continuous(breaks = scales::breaks_extended(3, only.loose = TRUE))
+```
+
+```{r}
+#| label: fig-parameter-recovery
+#| warning: false
+modified_plot_sim_estimated(
+  results_post_sbc$stats,
+  variables = unique(results_post_sbc$stats$variable),
+  alpha = 1,
+  facet_labeller = label_for_paper,
+  nrow = 3) +
+  labs(x = "Ground truth", y = "Estimate") +
+  scale_x_continuous(breaks = scales::breaks_extended(3, only.loose = TRUE)) +
+  scale_y_continuous(breaks = scales::breaks_extended(3, only.loose = TRUE))
+```
+
+## A closer look at one augmented posterior
+Next, we look at the augmented posterior of the SBC iteration where the worst R hat values were encountered.
+
+```{r}
+bad_sim_id <- results_post_sbc$default_diagnostics$sim_id[
+  which.max(results_post_sbc$default_diagnostics$max_rhat)]
+
+if (file.exists(file.path(stan_fit_dir, "fit_high_r_hat.RDS"))) {
+  fit_high_r_hat <- readRDS(file.path(stan_fit_dir, "fit_high_r_hat.RDS"))
+} else {
+fit_high_r_hat <- sbc_model$sample(
+  data = c(posterior_datasets$generated[[bad_sim_id]], n_pred = 0),
+  iter_warmup = iter_warmup,
+  iter_sampling = n_samples / n_chains,
+  chains = n_chains,
+  refresh = 0,
+  show_messages = F,
+  show_exceptions = F,
+  seed = seed
+  )
+  if (save_stan_fit) {
+    fit_high_r_hat$save_object(file.path(stan_fit_dir, "fit_high_r_hat.RDS"))
+  }
+}
+```
+
+Below, in @fig-posterior-draw, we show the parameter values used in generating the posterior predictive draw.
+```{r}
+#| label: fig-posterior-draw
+mcmc_recover_hist(
+  x = fit0$draws(colnames(posterior_datasets$variables)),
+  true = c(as_draws_matrix(merge_chains(thin_draws(fit0$draws(
+  variables = c("theta", "z_init", "sigma", "loglik")
+), n_samples / n_sbc_iter)))[bad_sim_id, ]),
+  bins = 50
+) +
+facet_wrap("Parameter", scales = "free", labeller = label_for_paper) +
+  theme(legend.position = "none") +
+  scale_x_continuous(breaks = scales::breaks_extended(3, only.loose = TRUE)) +
+  scale_y_continuous(breaks = scales::breaks_extended(3, only.loose = TRUE))
+```
+
+Next, we look at the pairs plot of the parameter posteriors. Below, in @fig-augmented-pairs, we see strong multi-modality as well as correlation between parameter values.
+
+```{r}
+#| label: fig-augmented-pairs
+#| fig-height: 10
+#| fig-width: 10
+mcmc_pairs(
+  x = fit_high_r_hat$draws(
+    variables = c("theta", "sigma")
+  ),
+  condition = pairs_condition(draws = .5),
+  off_diag_args = list(
+    alpha = .1,
+    size = .5
+  )
+)
+```
+```{r}
+library(plyr)
+dat <- fit_high_r_hat$draws(variables = c("theta[1]", "theta[3]"),
+                            format = "df")[, c("theta[1]", "theta[3]")]
+
+id_ls <- dat |> apply(1, \(r) {
+  (r[1] - mean(dat$`theta[1]`[dat$`theta[1]` < .8 &
+                                dat$`theta[3]` < 1.1])) ^ 2 +
+    (r[2] - mean(dat$`theta[3]`[dat$`theta[1]` < .8 &
+                                  dat$`theta[3]` < 1.1])) ^ 2
+}) |>  which.min()
+
+id_hs <- dat |> apply(1, \(r) {
+  (r[1] - mean(dat$`theta[1]`[dat$`theta[1]` >= .8 &
+                                dat$`theta[3]` >= 1.1])) ^ 2 +
+    (r[2] - mean(dat$`theta[3]`[dat$`theta[1]` >= .8 &
+                                  dat$`theta[3]` >= 1.1])) ^ 2
+}) |>
+  which.min()
+```
+
+
+```{r}
+#| label: bimodal-posterior
+#| fig-height: 6
+#| fig-width: 8
+#| fig-cap: Predictive mean and 95\% predictive interval for parameter values from the two modes.
+library(latex2exp)
+dat_pops <- fit_high_r_hat$draws(variables = c("theta", "z_init", "sigma"),
+                                 format = "matrix")
+pops_ls <- ode(
+  f = function(h, l) {
+    c((dat_pops[id_ls, "theta[1]"] - dat_pops[id_ls, "theta[2]"] * l) * h, (-dat_pops[id_ls, "theta[3]"] + dat_pops[id_ls, "theta[4]"] * h) * l)
+  },
+  var = c(h = dat_pops[id_ls, "z_init[1]"], l = dat_pops[id_ls, "z_init[2]"]),
+  times = 1:21
+)
+
+pops_hs <- ode(
+  f = function(h, l) {
+    c((dat_pops[id_hs, "theta[1]"] - dat_pops[id_hs, "theta[2]"] * l) * h, (-dat_pops[id_hs, "theta[3]"] + dat_pops[id_hs, "theta[4]"] * h) * l)
+  },
+  var = c(h = dat_pops[id_hs, "z_init[1]"], l = dat_pops[id_hs, "z_init[2]"]),
+  times = 1:21
+)
+blue <- "#386cb0"
+red <- "#bf5b17"
+green <- "#57A773"
+
+scatter_plot <- ggplot(dat) +
+  geom_point(
+    aes(x = `theta[1]`, y = `theta[3]`),
+    colour = "black",
+    alpha = .1,
+    stroke = 0,
+    size = 2
+  ) +
+  annotate(
+    "point",
+    x = unlist(dat[id_ls, "theta[1]"]),
+    y = unlist(dat[id_ls, "theta[3]"]),
+    colour = red,
+    size = 5,
+    shape = 18
+  ) +
+  annotate(
+    "point",
+    x = unlist(dat[id_hs, "theta[1]"]),
+    y = unlist(dat[id_hs, "theta[3]"]),
+    colour = blue,
+    size = 5,
+    shape = 18
+  ) +
+  labs(x = TeX(r"($\alpha$)"),
+       y = TeX(r"($\gamma$)")) +
+  theme(axis.text = element_blank()) +
+NULL
+
+pop_plot <- ggplot(mapping = aes(x = lynx_hare_df$Year)) +
+  geom_ribbon(aes(
+    ymax = qlnorm(.95, log(pops_hs[, "h"]), dat_pops[id_hs, "sigma[1]"]),
+    ymin = qlnorm(.05, log(pops_hs[, "h"]), dat_pops[id_hs, "sigma[1]"])
+  ),
+  fill = blue,
+  alpha = .2) +
+  geom_ribbon(aes(
+    ymax = qlnorm(.95, log(pops_ls[, "h"]), dat_pops[id_ls, "sigma[1]"]),
+    ymin = qlnorm(.05, log(pops_ls[, "h"]), dat_pops[id_ls, "sigma[1]"])
+  ),
+  fill = red,
+  alpha = .2) +
+  geom_path(aes(y = qlnorm(.5, log(pops_ls[, "h"]), dat_pops[id_ls, "sigma[1]"])), colour = red) +
+  geom_line(aes(y = qlnorm(.5, log(pops_hs[, "h"]), dat_pops[id_hs, "sigma[1]"])), colour = blue) +
+  geom_point(aes(y = lynx_hare_df$Hare, shape = "Obs"), colour = "black") +
+  geom_point(aes(y = unname(
+    c(
+      posterior_datasets$generated[[bad_sim_id]]$y_init2[1],
+      posterior_datasets$generated[[bad_sim_id]]$y2[, 1]
+    )
+  ), shape = "Sim"), colour = "gray30") +
+  labs(y = "Population", x = "Time", shape = "") +
+  theme(
+    axis.ticks.y = element_blank(),
+    axis.text = element_blank(),
+    legend.position = "none",
+    legend.box.spacing = unit(-10, "pt"),
+    legend.margin = margin(0, 0, 0, 0),
+    panel.grid = element_blank()
+  )
+
+scatter_plot +
+  annotation_custom(grob = ggplotGrob(pop_plot),
+                    xmin = 1.3,
+                    ymin = 1.1)
+```
+
+Lastly, we show the resulting marginal posteriors in relation to the true parameter values.
+```{r}
+#| label: recover_hist_bad_posterior
+#| fig-height: 8
+#| fig-width: 10
+mcmc_recover_hist(
+  x = fit_high_r_hat$draws(colnames(posterior_datasets$variables)),
+  true = c(posterior_datasets$variables[bad_sim_id, ]),
+  bins = 50
+) +
+facet_wrap("Parameter", scales = "free", labeller = label_for_paper) +
+  theme(legend.position = "none") +
+  scale_x_continuous(breaks = scales::breaks_extended(3, only.loose = TRUE)) +
+  scale_y_continuous(breaks = scales::breaks_extended(3, only.loose = TRUE))
+```
+
+
